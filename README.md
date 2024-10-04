@@ -1,0 +1,2 @@
+# sporeAI
+predicting sporulation
