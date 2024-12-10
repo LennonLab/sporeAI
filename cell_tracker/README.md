@@ -12,9 +12,13 @@ A Python package for automated cell segmentation and tracking using cellSAM (Seg
 - Configurable via YAML files
 - Command-line interface for batch processing
 
+## Installation
+
 ### Prerequisites
 - Python 3.9+
 - CUDA-capable GPU (recommended for optimal performance)
+
+### Using Conda (Recommended)
 
 
 # Basic usage
