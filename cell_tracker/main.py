@@ -1,76 +1,54 @@
+"""
+Cell Tracker Main Script
+----------------------
+Command-line interface for cell segmentation.
+"""
+
 import argparse
 from pathlib import Path
-from modules import (
-    ImageLoader,
-    Preprocessor,
-    Segmenter,
-    PostProcessor,
-    Recombiner
-)
-import os
-from skimage import io
-import json
-import numpy as np
-
-def save_output(img, filename, output_dir):
-    """Save an image to the output directory."""
-    output_path = Path(output_dir) / filename
-    io.imsave(str(output_path), img)
-    print(f"Saved output to: {output_path}")
+from modules import CellSeg
 
 def main(image_path, output_dir="data/output"):
+    """
+    Main processing pipeline.
+    
+    Args:
+        image_path (str): Path to input image
+        output_dir (str): Directory for saving results
+    """
     # Create output directory
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Load image
-        img = ImageLoader.load_image(image_path)
+        # Initialize and run cell segmentation
+        cell_seg = CellSeg()
         
-        # Process with default configuration
-        preprocessor = Preprocessor()
-        img_preprocessed = preprocessor.process(img)
-        save_output(img_preprocessed, 'preprocessed.tif', output_dir)
+        # Load and process image
+        cell_seg.load_image(image_path)
         
-        # Segment
-        segmenter = Segmenter()
-        mask = segmenter.segment(img_preprocessed)
-        save_output(mask, 'raw_segmentation.tif', output_dir)
+        # Remove distance metric if present
+        cell_seg.remove_distance_metric()
         
-        # Recombine if using quadrant mode
-        if DEFAULT_CONFIG['segmentation']['quadrant_mode']:
-            recombiner = Recombiner()
-            mask = recombiner.merge_boundary_cells(mask)
-            save_output(mask, 'recombined.tif', output_dir)
+        # Optional: Apply Gaussian blur
+        # cell_seg.apply_gaussian_blur()
         
-        # Post-process
-        postprocessor = PostProcessor()
-        final_mask = postprocessor.process(mask)
+        # Segment the image (choose one method)
+        # Option 1: Direct segmentation
+        # mask, boxes = cell_seg.segment_image()
         
-        # Save results
-        save_output(final_mask, 'final_segmentation.tif', output_dir)
-        properties = postprocessor.get_object_properties(final_mask)
+        # Option 2: Quadrant segmentation
+        cell_seg.segment_quadrants(min_size=200)
         
-        # Save properties
-        properties_path = Path(output_dir) / 'cell_properties.json'
-        with open(properties_path, 'w') as f:
-            json.dump(properties, f, indent=2, cls=NumpyEncoder)
+        # Visualize results
+        cell_seg.visualize()
         
         print("Processing completed successfully!")
+        print(f"Number of cells detected: {cell_seg.num_cells}")
         
     except Exception as e:
         print(f"An error occurred: {str(e)}")
         raise
-
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        return super().default(obj)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Cell Segmentation using cellSAM')
@@ -78,5 +56,6 @@ if __name__ == "__main__":
                       help='Path to the input image')
     parser.add_argument('--output', type=str, default='data/output',
                       help='Path to output directory')
+    
     args = parser.parse_args()
     main(args.image, args.output) 
