@@ -1,16 +1,18 @@
 # Cell Tracker
 
-A Python package for automated cell segmentation and tracking using cellSAM (Segment Anything Model adapted for cellular images). The package provides efficient processing of microscopy images with support for large image processing through quadrant-based segmentation.
+A Python package for automated cell segmentation using cellSAM (Segment Anything Model adapted for cellular images). This package provides efficient processing of microscopy images with support for both direct and quadrant-based segmentation.
 
 ## Features
 
 - Automated cell segmentation using cellSAM
 - Support for high-resolution TIFF images
-- Quadrant-based processing for large images with intelligent boundary merging
-- Automatic artifact removal and preprocessing
-- Visualization tools for segmentation results
-- Configurable via YAML files
-- Command-line interface for batch processing
+- Two segmentation modes:
+  - Direct segmentation for smaller images
+  - Quadrant-based processing for large images
+- Automatic artifact removal (10µm scale bar removal)
+- Optional Gaussian blur preprocessing
+- Built-in visualization tools
+- Simple command-line interface
 
 ## Installation
 
@@ -19,18 +21,3 @@ A Python package for automated cell segmentation and tracking using cellSAM (Seg
 - CUDA-capable GPU (recommended for optimal performance)
 
 ### Using Conda (Recommended)
-
-
-# Basic usage
-python orchestrator.py input_file [options]
-
-Options:
-  -q, --quadrant         Enable quadrant segmentation
-  -c, --config CONFIG    Path to config file
-  -v, --visualize       Visualize results
-  -o, --output OUTPUT   Output directory (default: data/output)
-
-python orchestrator.py path/to/image.tif
-
-# With all options
-python orchestrator.py path/to/image.tif -q -v -c custom_config.yaml -o custom/output/dir
