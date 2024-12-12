@@ -16,6 +16,7 @@ class CellSeg:
         self.bounding_boxes = None
         self.centroids = None
         self.num_cells = None
+        self.cell_images = None
         # load the cellSAM model
         # TODO: add functionality to get model directly from saved .pt instead of downloading everytime.
         get_model()
@@ -25,7 +26,7 @@ class CellSeg:
         path = Path(img_path)
         if not path.exists():
             raise FileNotFoundError(f"The file {img_path} does not exist.")
-        
+
         try:
             # img = cv2.imread(img_path)
             # img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -33,7 +34,7 @@ class CellSeg:
             self.img = img
         except Exception as e:
             raise ValueError(f"Failed to load image from {img_path}: {str(e)}")
-        
+
     def remove_distance_metric(self):
         """inpaint image to remove 10um artifact using inpainting"""
         mask = (self.img[:, :, 0] != self.img[:, :, 1]) | (self.img[:, :, 0] != self.img[:, :, 2])
@@ -44,26 +45,26 @@ class CellSeg:
         """apply a gaussian blur to the image"""
         self.img = cv2.GaussianBlur(self.img, kernel, sigma)
 
-    
+
     def segment_image(self, img, bounding_box_threshold = 0.2):
         """ Segment image using cellSAM"""
         available_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # see function at https://github.com/vanvalenlab/cellSAM/blob/master/cellSAM/model.py
         mask, _, bboxes = segment_cellular_image(
-            img, 
-            device=str(available_device), 
-            normalize=True, 
+            img,
+            device=str(available_device),
+            normalize=True,
             fast=True,
             bbox_threshold=bounding_box_threshold
             )
-        
+
         # convert predicted bounding boxes from tensor to np array
         boxes = bboxes[0].cpu().numpy()
         return mask, boxes
-        
-    
-    def segment_quadrants(self, min_size = 200):
+
+
+    def segment_quadrants(self, min_size = 700):
         """
         Segment the image by dividing it into quadrants, segmenting each separately, and then merging.
 
@@ -125,7 +126,7 @@ class CellSeg:
 
         # Handle objects that cross quadrant boundaries
         final_mask, _ = measure.label(final_mask, background=0, return_num=True)
-        
+
         ### Remove small objects and get cell properties
         # get properties of each labeled region
         props = measure.regionprops(final_mask)
@@ -143,7 +144,7 @@ class CellSeg:
                 bboxes.append(prop.bbox) # (y_min, x_min, y_max, x_max)
 
         # Convert the bboxes to the format [min_x, min_y, max_x, max_y]
-        boxes = [[float(min_x), float(min_y), float(max_x), float(max_y)] for (min_y, min_x, max_y, max_x) in bboxes]
+        boxes = [[min_x, min_y, max_x, max_y] for (min_y, min_x, max_y, max_x) in bboxes]
 
         final_mask, num_cells = measure.label(final_mask, background=0, return_num=True)
 
@@ -151,7 +152,7 @@ class CellSeg:
         self.num_cells = num_cells
         self.bounding_boxes = boxes
         self.centroids = centers
-        
+
 
     def visualize(self):
         """Visualize segmentation results"""
@@ -166,7 +167,7 @@ class CellSeg:
           # Mask overlay
           ax2.imshow(self.img)
           colored_mask = np.ma.masked_where(self.mask == 0, self.mask)
-          ax2.imshow(colored_mask, cmap='spring', alpha=0.5)
+          ax2.imshow(colored_mask, cmap='hsv', alpha=0.5)
           ax2.set_title("Segmentation Mask")
           ax2.axis('off')
 
@@ -191,3 +192,17 @@ class CellSeg:
           plt.axis('off')
           plt.imshow(self.img)
           plt.show()
+
+    def get_cell_images(self):
+        """Get cell images from the original image using the bounding boxes"""
+        images = []
+        if self.bounding_boxes is not None:
+            for box in self.bounding_boxes:
+                crop = self.img[box[1]:box[3],box[0]:box[2]]
+                images.append(crop)
+        else:
+            raise ValueError("Bounding boxes are not available. Please segment the image first.")
+
+        self.cell_images = images
+
+
