@@ -1,0 +1,544 @@
+---
+title: "infected.pilot.analysis"
+author: "Joy O'Brien"
+date: "2026-08-31"
+output: html_document
+---
+
+0. Set wd and figure theme
+```{r}
+setwd("~/GitHub/sporeAI")
+```
+
+## Figure theme
+```{r}
+library(paletteer)
+library(ggplot2)
+theme_set(theme_classic() +
+  theme(axis.title = element_text(size = 16),
+        axis.title.x = element_text(margin = margin(t = 15, b = 15)),
+        axis.title.y = element_text(margin = margin(l = 15, r = 15)),
+        axis.text = element_text(size = 13),
+        axis.text.x = element_text(margin = margin(t = 5)),
+        axis.text.y = element_text(margin = margin(r = 5)),
+        #axis.line.x = element_line(linewidth = 1),
+        #axis.line.y = element_line(linewidth = 1),
+        axis.ticks.y.right = element_line(linewidth = 1),
+        axis.text.y.right = element_text(size = 13, margin = margin(l = 5)),
+        axis.line.y.right = element_line(linewidth = 0.1),
+        axis.ticks.x.top = element_line(linewidth = 1),
+        axis.text.x.top = element_text(size = 13, margin = margin(b = 5)),
+        axis.line.x.top = element_line(linewidth = 0.1),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks.x = element_line(linewidth = 1),
+        axis.ticks.y = element_line(linewidth = 1),
+        axis.ticks.length = unit(.1, "in"),
+        panel.border = element_rect(color = "grey20", fill = NA, linewidth = 1.5),
+        legend.text = element_text(size = 14),
+        strip.text = element_text(size = 14),
+        strip.background = element_blank()
+        )) 
+colors <-paletteer_d("ggthemes::Miller_Stone")
+```
+
+1. Load in data
+```{r}
+library(tidyverse)
+
+# Folder containing all CSV files
+pilot.data.folder <- "~/GitHub/sporeAI/data/infection.pilot.results"
+
+# Get all CSV files
+files <- list.files(
+  path = pilot.data.folder,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+# Since folder contains .csvs
+all_data <- map_dfr(files, function(file) {
+
+  filename <- tools::file_path_sans_ext(basename(file))
+
+  dat <- read_csv(file, show_col_types = FALSE)
+
+  parts <- str_split(filename, "_")[[1]]
+
+  dat %>%
+    mutate(
+      Treatment = parts[1],
+      Time = as.numeric(str_remove(parts[2], "T")),
+      Stage = if_else(
+        "preinfect" %in% parts,
+        "preinfect",
+        "postinfect"
+      ),
+      Replicate = as.numeric(parts[length(parts)]),
+      File = filename
+    )
+})
+```
+
+2. Rename treatments to be more informative
+```{r}
+all_data <- all_data %>%
+  mutate(
+    Flask = Treatment,
+    Treatment = recode(
+      Treatment,
+      "A" = "Early infection",
+      "B" = "Early infection",
+      "C" = "Late infection",
+      "D" = "Control"
+    ),
+    BioRep = recode(
+      Flask,
+      "A" = "1",
+      "B" = "2",
+      "C" = "1",
+      "D" = "1"
+    )
+  )
+
+# Rename replicate to image
+all_data <- all_data %>%
+  rename(
+    Image = Replicate)
+head(all_data)
+```
+
+2. Looking at the distributions
+```{r}
+glimpse(all_data)
+summary(all_data)
+
+all_data %>%
+  count(name, sort = TRUE)
+
+# Check the amount of data per experimental group
+all_data %>%
+  count(Treatment, Flask, Time, Image)
+
+filt.data <- all_data %>%
+  filter(Stage != "preinfect") # subset from the preinfect images 
+```
+```{r}
+counts <- filt.data %>%
+  count(Treatment, Flask, Time, Image, name)
+
+ggplot(
+  counts,
+  aes(
+    x = Time,
+    y = n,
+    color = name,
+    group = interaction(Flask, Image, name)
+  )
+) +
+  geom_line(alpha = 0.4) +
+  geom_point() +
+  facet_wrap(~ Treatment) +
+  labs(
+    x = "Time",
+    y = "Number of cells",
+    color = "Stage"
+  )
+```
+## Summarize as percentage
+```{r}
+image_summary <- filt.data %>%
+  count(Treatment, Flask, Time, Image, name) %>%
+  group_by(Treatment, Flask, Time, Image) %>%
+  mutate(
+    total = sum(n),
+    percent = n / total * 100
+  ) %>%
+  ungroup()
+```
+
+## Plot as percent of cells
+```{r}
+ggplot(
+  image_summary,
+  aes(
+    x = Time,
+    y = percent,
+    color = name
+  )
+) +
+  geom_point() +
+  geom_line(
+    aes(group = interaction(Flask, Image, name)),
+    alpha = 0.3
+  ) +
+  facet_wrap(~ Treatment) +
+  labs(
+    x = "Time",
+    y = "Percent of cells",
+    color = "Stage"
+  )
+```
+
+## Plot early infection
+```{r}
+image_summary <- all_data %>%
+  count(Treatment, Flask, Time, Image, name) %>%
+  group_by(Treatment, Flask, Time, Image) %>%
+  mutate(
+    total = sum(n),
+    percent = n / total * 100
+  ) %>%
+  ungroup()
+ggplot(
+  image_summary %>%
+    filter(Treatment == "Early infection"),
+  aes(
+    x = Time,
+    y = percent,
+    color = name
+  )
+) +
+  geom_point() +
+  geom_line(
+    aes(group = interaction(Flask, Image, name)),
+    alpha = 0.3
+  ) +
+  labs(
+    title = "Early infection",
+    x = "Time",
+    y = "Percent of cells",
+    color = "Cell type"
+  ) 
+
+```
+## Plot late infection
+```{r}
+ggplot(
+  image_summary %>%
+    filter(Treatment == "Late infection"),
+  aes(
+    x = Time,
+    y = percent,
+    color = name
+  )
+) +
+  geom_point() +
+  geom_line(
+    aes(group = interaction(Flask, Image, name)),
+    alpha = 0.3
+  ) +
+  labs(
+    title = "Late infection",
+    x = "Time",
+    y = "Percent of cells",
+    color = "Cell type"
+  )
+```
+## Control
+```{r}
+ggplot(
+  image_summary %>%
+    filter(Treatment == "Control"),
+  aes(
+    x = Time,
+    y = percent,
+    color = name
+  )
+) +
+  geom_point() +
+  geom_line(
+    aes(group = interaction(Flask, Image, name)),
+    alpha = 0.3
+  ) +
+  labs(
+    title = "Control",
+    x = "Time",
+    y = "Percent of cells",
+    color = "Cell type"
+  )
+```
+```{r}
+# Look at flasks A and B separately (they are replicates)
+ggplot(
+  image_summary %>%
+    filter(Flask %in% c("A", "B")),
+  aes(
+    x = Time,
+    y = percent,
+    color = name
+  )
+) +
+  geom_point() +
+  geom_line(
+    aes(group = interaction(Image, name)),
+    alpha = 0.4
+  ) +
+  facet_wrap(~ Flask) +
+  labs(
+    x = "Time",
+    y = "Percent of cells",
+    color = "Cell type"
+  ) 
+```
+## Summarize data to mean percent of cells for each stage and plot over time for each treatment (accounts for flask A and B in early infection)
+```{r}
+image_summary <- filt.data %>%
+  count(Treatment, Flask, Time, Image, name) %>%
+  group_by(Treatment, Flask, Time, Image) %>%
+  mutate(
+    total = sum(n),
+    percent = n / total * 100
+  ) %>%
+  ungroup()
+
+
+flask_summary <- image_summary %>%
+  group_by(Treatment, Flask, Time, name) %>%
+  summarise(
+    mean_percent = mean(percent, na.rm = TRUE),
+    sd_percent = sd(percent, na.rm = TRUE),
+    n_images = n(),
+    se_percent = sd_percent / sqrt(n_images),
+    .groups = "drop"
+  )
+
+ggplot(
+  flask_summary,
+  aes(
+    x = Time,
+    y = mean_percent,
+    color = name,
+    group = name
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  geom_errorbar(
+    aes(
+      ymin = mean_percent - se_percent,
+      ymax = mean_percent + se_percent
+    ),
+    width = 0.15
+  ) +
+  facet_wrap(~Treatment, nrow=1) +
+  labs(
+    x = "Time",
+    y = "Mean percent of cells",
+    color = "Cell type"
+  ) 
+
+plot1 <- ggplot(
+  flask_summary,
+  aes(
+    x = Time,
+    y = mean_percent,
+    color = name,
+    group = name
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  geom_errorbar(
+    aes(
+      ymin = mean_percent - se_percent,
+      ymax = mean_percent + se_percent
+    ),
+    width = 0.15
+  ) +
+  facet_wrap(~ Treatment, nrow = 1) +
+  labs(
+    x = "Time",
+    y = "Mean percent of cells",
+    color = "Cell type"
+  )
+
+plot1
+
+ggsave(
+  "treatments.png",
+  plot = plot1,
+  width = 15,
+  height = 5,
+  units = "in",
+  dpi = 300
+)
+```
+
+# Plot with the lines but also smooth to get sense of what is happening
+```{r}
+plot2 <- ggplot(
+  flask_summary, # plotting this does not account for the fact that flask a and b are replicates, so I plotted differently below
+  aes(
+    x = Time,
+    y = mean_percent,
+    color = name,
+    group = name
+  )
+) +
+  geom_line(
+    alpha = 0.25,
+    linewidth = 0.6
+  ) +
+  geom_point(
+    alpha = 0.5,
+    size = 2
+  ) +
+  geom_smooth(
+    method = "loess",
+    se = FALSE,
+    linewidth = 1.2
+  ) +
+  facet_wrap(~ Treatment, nrow = 1) +
+  labs(
+    x = "Time",
+    y = "Mean percent of cells",
+    color = "Cell type"
+  )
+
+plot2
+
+ggsave(
+  "treatments_smooth.png",
+  plot = plot2,
+  width = 15,
+  height = 5,
+  units = "in",
+  dpi = 300
+)
+```
+
+# look at distributions of cells via stacked bar
+```{r}
+stage_summary <- filt.data %>%
+  count(Treatment, Time, name) %>%
+  group_by(Treatment, Time) %>%
+  mutate(
+    percent = n / sum(n) * 100
+  ) %>%
+  ungroup()
+
+ggplot(
+  stage_summary,
+  aes(
+    x = factor(Time),
+    y = percent,
+    fill = name
+  )
+) +
+  geom_col() +
+  facet_wrap(~ Treatment, nrow = 1) +
+  labs(
+    x = "Time",
+    y = "Percent of cells",
+    fill = "Sporulation stage"
+  ) 
+```
+
+## Diag plot to see model confidence in each stage
+```{r}
+plot3 <- ggplot(
+  filt.data,
+  aes(
+    x = name,
+    y = confidence
+  )
+) +
+  geom_boxplot() +
+  labs(
+    x = "Predicted sporulation stage",
+    y = "Model confidence"
+  )
+
+plot3
+# ggsave(
+#   "model_confidence.png",
+#   plot = plot3,
+#   width = 15,
+#   height = 5,
+#   units = "in",
+#   dpi = 300
+# )
+```
+## 
+```{r}
+# average biological replicates (correcting for A and B in early infection treatment)
+treatment_summary <- flask_summary %>%
+  group_by(Treatment, Time, name) %>%
+  summarise(
+    mean_percent = mean(mean_percent, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot4 <- ggplot(
+  treatment_summary,
+  aes(
+    x = Time,
+    y = mean_percent,
+    color = name,
+    group = name
+  )
+) +
+  geom_point(size = 2) +
+  geom_line(alpha = 0.3) +
+  geom_smooth(
+    method = "loess",
+    se = FALSE,
+    linewidth = 1.2
+  ) +
+  facet_wrap(~ Treatment, nrow = 1) +
+  labs(
+    x = "Time",
+    y = "Mean percent of cells",
+    color = "Cell type"
+  )
+plot4
+# ggsave(
+#   "treatments_smooth_mean.png",
+#   plot = plot4,
+#   width = 15,
+#   height = 5,
+#   units = "in",
+#   dpi = 300
+# )
+```
+
+
+## Initial thoughts
+- This pilot experiment likely does not capture the full sporulation window: Across all experimental flasks, mature spores are very low, I expected to see an increase in mature spores over time across all treatments (especially the control), this indicates to me that I did not capture the full sporulation window (which was my initial gut feeling when looking a the images--I want to continue experiment to image hours 8-16)
+- On this same note, even though late stage spores and mature spore abundance is low, it’s the highest (accounts for ~ 35% ) in early infection treatment at t = 5 which is curious
+- Early infection shows a pronounced decline in vegetative cells between approx T2-T5, this could be a signal of lysis maybe, and that is interestingly accompanied by an increase in stage 4 spores
+- I wasn’t expecting late-infection treatment to show a rather consistent amount of vegetative cells over time, I think this could be due to the model not yet trained on stage 1 of sporulation (since veg. cells and stage 1 cells are phenotyptically similar), however if this persists it could be indicative of some sort of stalling of the progression of sporulation
+
+## Plotting with A and B as two separate lines in early infection treatment 
+```{r}
+ggplot(
+  flask_summary,
+  aes(
+    x = Time,
+    y = mean_percent,
+    color = name
+  )
+) +
+  geom_line(
+    aes(group = interaction(Flask, name)),
+    alpha = 0.25,
+    linewidth = 0.6
+  ) +
+  geom_point(
+    alpha = 0.5,
+    size = 2
+  ) +
+  geom_smooth(
+    aes(group = name),
+    method = "loess",
+    se = FALSE,
+    linewidth = 1.2
+  ) +
+  facet_wrap(~ Treatment, nrow = 1) +
+  labs(
+    x = "Time",
+    y = "Mean percent of cells",
+    color = "Cell type"
+  )
+```
+
