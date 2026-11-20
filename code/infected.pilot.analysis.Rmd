@@ -47,7 +47,7 @@ colors <-paletteer_d("ggthemes::Miller_Stone")
 library(tidyverse)
 
 # Folder containing all CSV files
-pilot.data.folder <- "~/GitHub/sporeAI/data/infection.pilot.results.V3/csv"
+pilot.data.folder <- "~/GitHub/sporeAI/data/infection.pilot_predictions_newlabels/csv"
 
 # Get all CSV files
 files <- list.files(
@@ -534,7 +534,7 @@ plot5 <- ggplot(
   ) +
   
   labs(
-    x = "Time",
+    x = "Time (h)",
     y = "Percent of cells",
     fill = "Cell type"
   ) +
@@ -585,14 +585,14 @@ plot3 <- ggplot(
   )
 
 plot3
-# ggsave(
-#   "model_confidence.png",
-#   plot = plot3,
-#   width = 15,
-#   height = 5,
-#   units = "in",
-#   dpi = 300
-# )
+ ggsave(
+  "model_confidence.png",
+   plot = plot3,
+   width = 15,
+   height = 5,
+   units = "in",
+   dpi = 300
+ )
 ```
 
 ## Initial thoughts
@@ -601,6 +601,1536 @@ plot3
 - Early infection shows a pronounced decline in vegetative cells between approx T2-T5, this could be a signal of lysis maybe, and that is interestingly accompanied by an increase in stage 4 spores
 - I wasn’t expecting late-infection treatment to show a rather consistent amount of vegetative cells over time, I think this could be due to the model not yet trained on stage 1 of sporulation (since veg. cells and stage 1 cells are phenotyptically similar), however if this persists it could be indicative of some sort of stalling of the progression of sporulation
 
+########################################################################
+
+PART 2: ABSORBING STATE FRAMEWORK/STAGE STRUCTURE MODELING
+filt.data contains the name of the predicted sporulation stage, the sampling time, treatment, model confidence for classification, experimental replicates etc which should be enough info to quantify stage structure over time 
+
+A. Calculate the observed stage distributions 
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+stage_counts <- filt.data %>%
+  mutate(
+    name = factor(name, levels = stage_levels)
+  ) %>%
+  count(
+    Treatment, BioRep, Flask, Time, name,
+    name = "n"
+  ) %>%
+  complete(
+    nesting(Treatment, BioRep, Flask, Time),
+    name = factor(stage_levels, levels = stage_levels),
+    fill = list(n = 0)
+  ) %>%
+  group_by(Treatment, BioRep, Flask, Time) %>%
+  mutate(
+    total_cells = sum(n),
+    proportion = n / total_cells
+  ) %>%
+  ungroup()
+
+```
+B. Fit a stage structured model (this might be difficult given that we do not have a failure state, so we have to start with a model that has successful completion as the only absorbing state)
+```{r}
+stage_summary <- stage_counts %>%
+  group_by(Treatment, Time, name) %>%
+  summarise(
+    mean_proportion = mean(proportion, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+stage_plot <- ggplot(
+  stage_summary,
+  aes(
+    x = Time,
+    y = mean_proportion,
+    fill = name
+  )
+) +
+  geom_area(
+    position = "stack",
+    alpha = 0.85
+  ) +
+  facet_wrap(~ Treatment) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent
+  ) +
+  labs(
+    x = "Time (h)",
+    y = "Proportion of classified cells",
+    fill = "Sporulation stage"
+  ) +
+  theme_classic()
+
+stage_plot
+```
+```{r}
+stage_counts %>%
+  group_by(Treatment, Time, name) %>%
+  summarise(
+    total_n = sum(n),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = name,
+    values_from = total_n,
+    values_fill = 0
+  ) %>%
+  print(n = Inf)
+```
+Minor issue: in the current data we are working with (which is pilot data) the stages are not monotonically progressing, meaning that in the early infection treatment, spore fraction rises, and declines, and then increases later again, i.e., the amount of complete cells entering the absorbing state should not decrease over time and our observations violate that prediction so becasue of this, we will work with a 3-state absorbing model, vegetative cells, sporulating (middle stages) and complete spore
+```{r}
+# Create simplified states
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+stage3_data <- filt.data %>%
+  mutate(
+    State = case_when(
+      name == "vegetative" ~ "Vegetative",
+      name %in% paste0("stage", 1:5) ~ "Sporulating",
+      name == "complete" ~ "Complete",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(State))
+# Calculate proportions
+stage3_counts <- stage3_data %>%
+  count(
+    Treatment, BioRep, Flask, Time, State,
+    name = "n"
+  ) %>%
+  complete(
+    nesting(Treatment, BioRep, Flask, Time),
+    State = c("Vegetative", "Sporulating", "Complete"),
+    fill = list(n = 0)
+  ) %>%
+  group_by(Treatment, BioRep, Flask, Time) %>%
+  mutate(
+    total = sum(n),
+    proportion = n / total
+  ) %>%
+  ungroup()
+
+# Summarize across samples
+stage3_summary <- stage3_counts %>%
+  group_by(Treatment, Time, State) %>%
+  summarise(
+    mean_prop = mean(proportion),
+    sd_prop = sd(proportion),
+    n_samples = n(),
+    .groups = "drop"
+  )
+
+# Plot trajectories
+ggplot(
+  stage3_summary,
+  aes(
+    x = Time,
+    y = mean_prop,
+    color = State
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ Treatment) +
+  scale_y_continuous(
+    labels = scales::percent,
+    limits = c(0, 1)
+  ) +
+  labs(
+    x = "Time (h)",
+    y = "Proportion of classified cells",
+    color = "Cell state"
+  )
+```
+Check observed trajectories for declines
+```{r}
+completion_check <- stage3_summary %>%
+  filter(State == "Complete") %>%
+  arrange(Treatment, Time) %>%
+  group_by(Treatment) %>%
+  mutate(
+    change = mean_prop - lag(mean_prop),
+    decreases = change < 0
+  ) %>%
+  ungroup()
+
+completion_check %>%
+  filter(decreases)
+```
+Fit model to observations
+```{r}
+library(deSolve)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+Prepare observed stage proportions
+```{r}
+stages <- c(
+  "vegetative", "stage1", "stage2",
+  "stage3", "stage4", "stage5", "complete"
+)
+
+observed <- filt.data %>%
+  filter(name %in% stages) %>%
+  count(Treatment, Time, name, name = "n") %>%
+  complete(
+    nesting(Treatment, Time),
+    name = stages,
+    fill = list(n = 0)
+  ) %>%
+  group_by(Treatment, Time) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+```
+Define stage-structured model of sporulation using ODE (underlying assumption: cells progress sequentially through sporulation, with completed spores representing an absorbed state, assuming constant transition rates (to simplify), no cell death or lysis, no developmental arrest as a separate fate )
+```{r}
+sporulation_model <- function(t, state, parameters) { # defining the function called sporulation_model which accepts 3 inputs: simulation time, state, and parameters which are the transition rates between stages 
+
+  with(as.list(c(state, parameters)), {
+
+    dvegetative <- -k0 * vegetative # describes the rate of change in the vegetative population (negative sign indicates that cells are leaving this state as sporulation is initiated) NOTE: this model assumes that veg cells decrease because they are entering sporulation and no other reason
+
+    dstage1 <- k0 * vegetative - k1 * stage1 # the rate at which veg cells enter stage 1
+    dstage2 <- k1 * stage1 - k2 * stage2 # the rate at which stage 1 cells progress to stage 2
+    dstage3 <- k2 * stage2 - k3 * stage3 # the rate at which stage 2 cells progress to stage 3
+    dstage4 <- k3 * stage3 - k4 * stage4 # the rate at which stage 3 cells progress to stage 4
+    dstage5 <- k4 * stage4 - k5 * stage5 # the rate at which stage 4 cells progress to stage 5 
+
+    dcomplete <- k5 * stage5 # the accumulation of completed spores (no negative term because spores cannot leave this state)
+
+    list(c( # return the 7 calculated rates of change to the ODE solver, the solver uses these derivatives to estimate how the pop. changes over time
+      dvegetative,
+      dstage1,
+      dstage2,
+      dstage3,
+      dstage4,
+      dstage5,
+      dcomplete
+    ))
+  })
+}
+```
+
+```{r}
+fit_sporulation <- function(treatment_name) { # defining the fitting function based on treatment group (control, early infection, or late) it fits each treatment independently
+
+  obs <- observed %>% # take the previously observed dataframe and perform two operations 1) select the observations for each treatment and 2) sort observations by time and then by developmental stage 
+    filter(Treatment == treatment_name) %>%
+    arrange(Time, match(name, stages)) # return the position of each stage within that vector this is important becasue the model contains multiple state variables and the order must match the order used when extracting observations to generate predictions
+
+  times <- sort(unique(obs$Time)) # identify observation times for which ODE will calculate predictions (time represents hours after DSM resuspension)
+
+  initial <- obs %>% # Define initial conditions the ODE needs to know the state of the system at the beginning of the simulation 
+    filter(Time == min(Time)) %>% # select the first time point (selects obs from the earliest sampling time)
+    arrange(match(name, stages)) %>% # arrange stages in developmental order
+    pull(proportion) # extract proportions 
+
+  names(initial) <- stages # assign corresponding stage names (initialize the model using the actual observed stage proportions at t=0)
+
+  objective <- function(log_rates) { # define the objective function which is the central part of the model fitting procedure (i.e., how well a particular set of model params reproduces the observations with the goal being to find the transition rates that minimize the discrepency between predicted and observed state proportions)
+
+    rates <- exp(log_rates) # the objective function takes an argument called log_rates, we do this because because we have 6 transition rates and these rates should not be negative (negative would imply that cells can move backward in the process)
+    names(rates) <- paste0("k", 0:5) 
+
+    prediction <- tryCatch( # simulate sporulation using the proposed rates (where the fitting function called the ODE model)
+      ode( # numerically solves the diff. equations in the sporulation model with the following arguments, the ODE solver then calculates how to pop would progress through sporulation under those rates, it produces predicted proportions for each stage at every sampling time 
+        y = initial,
+        times = times,
+        func = sporulation_model,
+        parms = rates
+      ),
+      error = function(e) NULL # if error occurs return NULL instead of stopping entire optimization
+    )
+
+    if (is.null(prediction)) return(1e12)
+
+    prediction <- as.data.frame(prediction) #organize model predictions
+
+    predicted <- as.matrix( # select the 7 develop,mental stage columns
+      prediction[, stages]
+    )
+
+    actual <- obs %>% # organize the observed data in the same format (same structure as predicted )
+      select(Time, name, proportion) %>%
+      pivot_wider(
+        names_from = name,
+        values_from = proportion
+      ) %>%
+      arrange(Time) %>%
+      select(all_of(stages)) %>% # ensures columns are in correct developmental order
+      as.matrix() # converts data frame into numeric matrix
+
+    sum((predicted - actual)^2) # calculate the difference between predictions and obs
+  }
+
+  fit <- optim( # find transition rates that minimize error 
+    par = log(rep(0.2, 6)),
+    fn = objective,
+    method = "BFGS"
+  )
+
+  rates <- exp(fit$par) # extract fitted transitions, resulting values represent the estimated transition rates, model-inferred and not directly observed
+  names(rates) <- paste0("k", 0:5)
+
+  list( # return list containing all components 
+    treatment = treatment_name,
+    rates = rates,
+    initial = initial,
+    fit = fit
+  )
+}
+# fit_sporulation function performs parm estimation by min. sum of squared differences between observed and ODE predicted sporulation stage proportions 
+# sporulation_model defines how cells are assumed to progress through sporulation 
+# fit_sporulation estimates which transition rates best reproduce the observed populaton comp. under those assumptions 
+```
+
+```{r}
+# Run the fit sporulation function separately for each treatment, store results, and extract estimated transition rates 
+fits <- lapply( # fit the model to each treatment, apply to every element in the vector list 
+  unique(observed$Treatment), # extract unique treatment names from df
+  fit_sporulation # each call fits the 7 state sporulation model to the treatment's observed stage proportions 
+)
+
+names(fits) <- unique(observed$Treatment) # name fitted models
+
+lapply(fits, function(x) x$rates) # extract the transition rates, the numbers outputted are 
+```
+Use fitted rates to simulate predicted stage distributions
+```{r}
+simulate_sporulation <- function(fit_object) { # define the simulation function and use fit object which are the results from the model fitting
+
+  times <- seq(0, 48, by = 0.25) # define simulation times 
+
+  prediction <- ode( # simulate sporulation using the fitted parms
+    y = fit_object$initial,
+    times = times,
+    func = sporulation_model,
+    parms = fit_object$rates # estimated transition rates from the fitting procedure
+  )
+
+  as.data.frame(prediction) %>% # ODE will return a matrix like object --> convert to df
+    pivot_longer( # convert from wide to long
+      cols = all_of(stages),
+      names_to = "name",
+      values_to = "predicted"
+    ) %>%
+    mutate(Treatment = fit_object$treatment)
+}
+
+simulated <- bind_rows( # simulate all 3 treatments 
+  lapply(fits, simulate_sporulation)
+)
+```
+Compare simulations to observed data
+```{r}
+ggplot() +
+  geom_line(
+    data = simulated,
+    aes(
+      x = time,
+      y = predicted,
+      color = name
+    ),
+    linewidth = 1
+  ) +
+  geom_point(
+    data = observed,
+    aes(
+      x = Time,
+      y = proportion,
+      color = name
+    ),
+    alpha = 0.6,
+    size = 1.5
+  ) +
+  facet_wrap(~ Treatment) +
+  labs(
+    x = "Time (h)",
+    y = "Proportion of cells",
+    color = "Sporulation stage"
+  ) 
+
+
+```
+Determining if absorbing state model describes sporulation data based on goodness of fit, residual analysis
+```{r}
+predicted_at_obs <- bind_rows( # generate predictions at the observed sampling times 
+  lapply(fits, function(f) {
+
+    times <- sort(unique( # extracts the sampling times for each treatment 
+      observed$Time[
+        observed$Treatment == f$treatment
+      ]
+    ))
+
+    pred <- ode( # generate model predicitons 
+      y = f$initial,
+      times = times,
+      func = sporulation_model,
+      parms = f$rates
+    )
+
+    as.data.frame(pred) %>% # reshape the predictions 
+      pivot_longer(
+        cols = all_of(stages),
+        names_to = "name",
+        values_to = "predicted"
+      ) %>%
+      mutate(Treatment = f$treatment)
+  })
+)
+
+comparison <- observed %>% # combine predictions with observations 
+  left_join(
+    predicted_at_obs,
+    by = c(
+      "Treatment",
+      "Time" = "time",
+      "name"
+    )
+  ) %>%
+  mutate( # calculate redisuals 
+    residual = proportion - predicted
+  )
+
+# Calculate RMSE and mean absolute error
+fit_metrics <- comparison %>%
+  group_by(Treatment) %>%
+  summarise(
+    RMSE = sqrt(mean(residual^2)),
+    MAE = mean(abs(residual)),
+    .groups = "drop"
+  )
+
+fit_metrics
+# Let's check to see what stages the model struggles to reproduce 
+stage_fit_metrics <- comparison %>%
+  group_by(Treatment, name) %>%
+  summarise(
+    RMSE = sqrt(mean(residual^2)),
+    MAE = mean(abs(residual)),
+    .groups = "drop"
+  )
+
+stage_fit_metrics
+```
+
+RMSE: Root mean squared error -- sensitivity to large errors is higher
+MAE: Mean absolute error -- sensistivity to large errors is lower
+Lower RMSE and MAEW values indicate that the fitted model more closely reproduces the observed proportions 
+
+For the control: relatively small overall differences between observed and predicted stage proportions
+
+For early infecton: this is much larger and suggests that the model has more difficulty reproducing the stage ditriubutions under early infection 
+
+Late infection: intermediate level of prediction error
+
+
+Examine residuals over time
+```{r}
+ggplot(
+  comparison,
+  aes(
+    x = Time,
+    y = residual,
+    color = name
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_point(size = 2) +
+  geom_line() +
+  facet_wrap(~ Treatment) +
+  labs(
+    x = "Time (h)",
+    y = "Observed - predicted proportion",
+    color = "Stage"
+  ) 
+
+# There is a lot of variation in the residuals, which aligns with the MAE and RSME score, the model does best with the control 
+```
+
+Check absorbing state assumption: we need to check to see whether the observed proporation of completed spores decreases between consecutive sampling times for each treatment 
+```{r}
+completion_changes <- observed %>%
+  filter(name == "complete") %>% # select completed spores
+  arrange(Treatment, Time) %>% # arrange chronologically 
+  group_by(Treatment) %>% # group obs by treatment
+  mutate(
+    previous_time = lag(Time),
+    previous_proportion = lag(proportion),
+    change = proportion - previous_proportion,
+    time_interval = Time - previous_time,
+    change_per_hour = change / time_interval
+    # calculate changes between consecutive time points (creating column called change )
+  ) %>%
+  ungroup()
+
+completion_changes %>%
+  filter(change < 0)
 
 ```
 
+Posterior predictive style model check (used to investigate whether the decreases in completed spore proportions could arise from sampling variability under the fitted model)
+```{r}
+largest_drop <- function(p) { # this function measures the largest decrease between consec. obs. 
+  max(c(0, -diff(p)))
+}
+
+```
+
+```{r}
+comparison <- comparison %>%
+  group_by(Treatment, Time) %>%
+  mutate(
+    total_cells = sum(n)
+  ) %>%
+  ungroup()
+
+comparison %>%
+  select(Treatment, Time, name, n, total_cells) %>%
+  head()
+```
+
+```{r}
+set.seed(123) #ensures that the random numbers generated during the sim are reproducible 
+
+check_completion <- function(treatment_name, nsim = 1000) { # define model checking function
+
+  dat <- comparison %>%
+    filter(
+      Treatment == treatment_name,
+      name == "complete"
+    ) %>%
+    arrange(Time)
+
+  observed_drop <- largest_drop(dat$proportion)
+
+  simulated_drops <- replicate(nsim, {
+
+    simulated_complete <- rbinom(
+      n = nrow(dat),
+      size = dat$total_cells,
+      prob = pmin(pmax(dat$predicted, 0), 1)
+    ) / dat$total_cells
+
+    largest_drop(simulated_complete)
+  })
+
+  data.frame(
+    Treatment = treatment_name,
+    Observed_drop = observed_drop,
+    Simulated_95th_percentile =
+      unname(quantile(simulated_drops, 0.95)),
+    Tail_probability =
+      mean(simulated_drops >= observed_drop)
+  )
+}
+
+completion_checks <- bind_rows(
+  lapply(unique(comparison$Treatment), check_completion)
+)
+
+completion_checks
+```
+Tail prob: fraction of simulated datasets in which the largest decrease was at least as large as the observed decrease
+i.e., none of the simulated datasets produced a drop this large 
+
+Okay these results above tell us that the current absobring state model does not adequately reproduce the dynamics we see, likely because the model is too restrictive to our observations, we likely need to include cell turnover, we are currently working with a model that does not allow for cells to enter the population even though division is likely occurring in our samples so instead of assuming a closed population, we need to assume a model with turnover
+
+Estimate where sporulation slows
+```{r}
+residence_times <- bind_rows(
+  lapply(fits, function(x) {
+    data.frame(
+      Treatment = x$treatment,
+      Stage = stages[1:6],
+      Rate = as.numeric(x$rates),
+      Residence_time_h = 1 / as.numeric(x$rates)
+    )
+  })
+)
+residence_times <- residence_times %>%
+  mutate(
+    Stage = factor(Stage, levels = stages[1:6])
+  )
+
+ggplot(
+  residence_times,
+  aes(
+    x = Stage,
+    y = Residence_time_h,
+    fill = Treatment
+  )
+) +
+  geom_col(
+    position = "dodge"
+  ) +
+  labs(
+    title = "Model-inferred residence times during sporulation",
+    x = "Developmental stage",
+    y = "Predicted mean residence time (h)",
+    fill = "Treatment"
+  ) 
+```
+```{r}
+residence_times %>%
+  arrange(Treatment, Residence_time_h)
+```
+
+
+Estimate probability of completion over time 
+```{r}
+completion_predictions <- simulated %>%
+  filter(name == "complete")
+
+ggplot(
+  completion_predictions,
+  aes(
+    x = time,
+    y = predicted,
+    color = Treatment
+  )
+) +
+  geom_line(linewidth = 1.2) +
+  scale_y_continuous(
+    labels = scales::percent,
+    limits = c(0, 1)
+  ) +
+  labs(
+    x = "Time (h)",
+    y = "Predicted probability of completion"
+  )
+```
+
+###### APPROACH 2: 3 STAGE MODEL #########
+What is changing here: we are simplifying the stages to see if that more accurately represents the pop dynamics 
+We also introduce a veg. growth parmater, r, allowing veg population to increase which is important because now this is no longer a closed population Note that this model still does not account for cell lysis or cell death 
+
+Observed 3 state data (reorganize data to fit with simplified model)
+Here we are converting the cell level microscopy classification to 3 state dataset containing counts and proportions for each treatment and sampling time 
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(deSolve)
+
+states3 <- c("Vegetative", "Sporulating", "Complete") # define 3 developmental states
+
+observed3 <- filt.data %>% # reclassify cells into three states 
+  mutate(
+    State = case_when(
+      name == "vegetative" ~ "Vegetative",
+      name %in% paste0("stage", 1:5) ~ "Sporulating", # if a cell is classified as stage 1, 2, 3, 4 etc. reclassify as sporulating
+      name == "complete" ~ "Complete",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(State)) %>% # remove cells without recognized classification
+  count(Treatment, Time, State, name = "n") %>% # count the number of cells in each state 
+  complete( # ensure all three states appear at every sampling time 
+    nesting(Treatment, Time),
+    State = states3,
+    fill = list(n = 0)
+  ) %>%
+  group_by(Treatment, Time) %>% # calculate total cells and proportions 
+  mutate(
+    total_cells = sum(n),
+    proportion = n / total_cells
+  ) %>%
+  ungroup()
+```
+
+Check
+```{r}
+observed3 %>%
+  filter(Treatment == "Early infection") %>%
+  print(n = 15)
+```
+Define population model
+(some model limitations to keep in mind: growth is exponential, transition rates are constant, progression is irreversible, completed spores remain absorbing, there is no lysis or cell death)
+```{r}
+population_model <- function(t, state, parameters) { # function called pop model 
+
+  with(as.list(c(state, parameters)), {
+
+    dVegetative <- r * Vegetative - k1 * Vegetative # model veg cells here r is the per capita veg growth rate (no nutrient limitation or carrying capacity)
+
+    dSporulating <- k1 * Vegetative - k2 * Sporulating # model sporulating cells
+
+    dComplete <- k2 * Sporulating # model cells completing sporulation
+
+    list(c( # return derivatives to the ODE solver
+      dVegetative,
+      dSporulating,
+      dComplete
+    ))
+  })
+}
+```
+Fit model to each treatment (estimate parms)
+```{r}
+fit_population <- function(treatment_name) { # create function to fit model 
+
+  obs <- observed3 %>%
+    filter(Treatment == treatment_name) # select observations for each treatment
+
+  counts <- obs %>% # restructure obs to a count matrix
+    select(Time, State, n) %>%
+    pivot_wider(
+      names_from = State,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    arrange(Time)
+
+  times <- counts$Time # extract sampling times
+
+  y0 <- as.numeric( # define the initial conditions 
+    counts[1, states3]
+  )
+
+  y0 <- y0 / sum(y0) # normalize the initial conditions 
+  names(y0) <- states3 # name the elements 
+
+  objective <- function(log_parameters) { # define the objective function 
+
+    parameters <- exp(log_parameters) # convert parms to log scale 
+    names(parameters) <- c("r", "k1", "k2")
+
+    prediction <- tryCatch( # solve the model using proposed parameters 
+      ode(
+        y = y0,
+        times = times,
+        func = population_model,
+        parms = parameters
+      ),
+      error = function(e) NULL
+    )
+
+    if (is.null(prediction)) return(1e12)
+
+    pred <- as.matrix( # extract predicted pop size 
+      as.data.frame(prediction)[, states3]
+    )
+
+    pred <- pred / rowSums(pred) # convert model predictions into proportions 
+    pred <- pmax(pred, 1e-12)
+    pred <- pred / rowSums(pred)
+
+    observed_counts <- as.matrix( # extract the observed cell counts
+      counts[, states3]
+    )
+
+    -sum(observed_counts * log(pred)) # calculate negative log liklihood 
+  }
+
+  fit <- optim( # optimize parms
+    par = log(c(0.1, 0.1, 0.1)),
+    fn = objective,
+    method = "Nelder-Mead",
+    control = list(maxit = 10000)
+  )
+
+  parameters <- exp(fit$par) # extract fitted parms
+  names(parameters) <- c("r", "k1", "k2")
+
+  list( # return the fitted model 
+    treatment = treatment_name,
+    parameters = parameters,
+    initial = y0,
+    fit = fit
+  )
+}
+```
+
+Fit the 3 state model to each of the experimental treatments
+```{r}
+fits3 <- lapply( # fit the model to each treatment 
+  unique(observed3$Treatment),
+  fit_population
+)
+
+names(fits3) <- unique(observed3$Treatment) # name the fitted models
+
+lapply(fits3, function(x) x$parameters) #extract the fitted parms
+
+# Verify that the optimization converged 
+lapply(fits3, function(x) x$fit$convergence)
+```
+Simulate fitted model over 48 h to estimate the proportions of veg. cells sporulating cells, and completed cells 
+```{r}
+simulate_population <- function(fit_object) { # define simulation function
+
+  prediction <- ode( # solve differential equations 
+    y = fit_object$initial,
+    times = seq(0, 48, by = 0.25),
+    func = population_model,
+    parms = fit_object$parameters
+  )
+
+  prediction <- as.data.frame(prediction) # convert simulation output to dataframe
+
+  prediction <- prediction %>% # calculate the total modeled pop
+    mutate(
+      total = Vegetative + Sporulating + Complete
+    ) %>%
+    mutate( # convert predicted pops into proportions
+      across(
+        all_of(states3),
+        ~ .x / total
+      )
+    )
+
+  prediction %>% # convert preditions into long format
+    pivot_longer(
+      cols = all_of(states3),
+      names_to = "State",
+      values_to = "predicted"
+    ) %>%
+    mutate(Treatment = fit_object$treatment) # identify the simulated treatments 
+}
+
+simulated3 <- bind_rows( # simulate all 3 fitted models
+  lapply(fits3, simulate_population)
+)
+```
+
+Compare observed and fitted trajectories
+```{r}
+ggplot() +
+  geom_line(
+    data = simulated3,
+    aes(
+      x = time,
+      y = predicted,
+      color = State
+    ),
+    linewidth = 1
+  ) +
+  geom_point(
+    data = observed3,
+    aes(
+      x = Time,
+      y = proportion,
+      color = State
+    ),
+    size = 2,
+    alpha = 0.7
+  ) +
+  facet_wrap(~ Treatment) +
+  scale_y_continuous(
+    labels = scales::percent,
+    limits = c(0, 1)
+  ) +
+  labs(
+    x = "Time (h)",
+    y = "Proportion of classified cells",
+    color = "Cell state"
+  ) 
+```
+```{r}
+predicted3_at_obs <- simulated3 %>% # extract model predictions at observed sampling times (we modeled the simulation for every 15 min, but now we need to filter for our exact smapling times)
+  filter(time %in% unique(observed3$Time)) %>% # extract distinct sampling times in observed df
+  rename(Time = time)
+
+comparison3 <- observed3 %>% # combine obs and predictions
+  left_join(
+    predicted3_at_obs,
+    by = c("Treatment", "Time", "State")
+  ) %>%
+  mutate( # calculate residuals 
+    residual = proportion - predicted
+  )
+
+fit_metrics3 <- comparison3 %>% # group residuals by treatment 
+  group_by(Treatment) %>%
+  summarise(
+    RMSE = sqrt(mean(residual^2)), # calculate RMSE
+    MAE = mean(abs(residual)), # calculate MAE
+    .groups = "drop"
+  )
+
+fit_metrics3
+
+# Check for missing predictions
+comparison3 %>%
+  filter(is.na(predicted)) %>%
+  distinct(Treatment, Time)
+```
+
+Okay so simplifying the model and introducing veg. growth did not eliminate mismatch between model predictions and observed infection dynamics, still with respect to early infection 
+
+Inspect residuals 
+```{r}
+
+ggplot(
+  comparison3,
+  aes(
+    x = Time,
+    y = residual,
+    color = State
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ Treatment) +
+  labs(
+    x = "Time (h)",
+    y = "Observed - predicted proportion"
+  ) 
+
+```
+Check fitted parms
+```{r}
+parameter_table <- bind_rows(
+  lapply(fits3, function(x) {
+    data.frame(
+      Treatment = x$treatment,
+      r = x$parameters["r"],
+      k1 = x$parameters["k1"],
+      k2 = x$parameters["k2"],
+      convergence = x$fit$convergence
+    )
+  })
+)
+
+parameter_table
+
+```
+What can we learn from the above output? (Interpret with caution, given that that model does not fit that well)
+r: vegetative growth rate 
+In the control treatment, the model estimated essentially no vegetative growth, but estimated positive veg. growth for both infection treatments 
+BUT  it is difficult to draw this conclusion becasue we didn't measure absolute pop. growth. instead we estimated growth from changes in the relative proportions of developmental states 
+
+k1: the rate at which veg. cells enter sporulation, both infection treatments have higher estimated initiation rates than the control (while this is enticing to say that infected cells enter sporulatiuon earflier I am not sure if that is okay to draw on here )
+I.e., the late infection rate is 2.6 times the control estimate 
+
+k2 is our sporulation rate; within the model, cells in the late infection treatment transition from teh combined sporulating state to the completed sporulating state more rapidly, but becasue we combined the intermediate stages, this is the effective transition rate across the entire sporulating category  
+
+In order to draw any light conclusuons from this, we should make sure that the model can reliably estimate individual parms
+
+```{r}
+control_fit <- fits3[["Control"]]
+
+control_fit$parameters
+
+# Create a rangle of candidate values for r 
+r_values <- seq(
+  from = 0, 
+  to = 0.2, 
+  by = 0.005
+)
+
+r_values
+
+# Prep observed cell counts
+control_counts <- observed3 %>%
+  filter(Treatment == "Control") %>%
+  select(Time, State, n) %>%
+  pivot_wider(
+    names_from = State,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  arrange(Time)
+
+control_counts
+
+# Create function that calcs the negative log-liklihood while holding r fixed
+
+# define the initial conditions and samp times
+control_times <- control_counts$Time
+
+control_y0 <- as.numeric(control_counts[1, states3])
+control_y0 <- control_y0 / sum(control_y0)
+names(control_y0) <- states3
+
+# define the neg. log-liklihood 
+profile_nll <- function(log_k, fixed_r) {
+
+  parameters <- c(
+    r = fixed_r,
+    k1 = exp(log_k[1]),
+    k2 = exp(log_k[2])
+  )
+
+  prediction <- tryCatch(
+    ode(
+      y = control_y0,
+      times = control_times,
+      func = population_model,
+      parms = parameters
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(prediction)) return(1e12)
+
+  pred <- as.matrix(
+    as.data.frame(prediction)[, states3]
+  )
+
+  pred <- pred / rowSums(pred)
+  pred <- pmax(pred, 1e-12)
+  pred <- pred / rowSums(pred)
+
+  observed_counts <- as.matrix(control_counts[, states3])
+
+  -sum(observed_counts * log(pred))
+}
+
+# Construct parameters
+profile_nll <- function(log_k, fixed_r) {
+
+  parameters <- c(
+    r = fixed_r,
+    k1 = exp(log_k[1]),
+    k2 = exp(log_k[2])
+  )
+
+  # Solve ODE
+  prediction <- tryCatch(
+    ode(
+      y = control_y0,
+      times = control_times,
+      func = population_model,
+      parms = parameters
+    ),
+    error = function(e) NULL
+  )
+
+  # Return a large penalty if the ODE solver fails
+  if (is.null(prediction)) return(1e12)
+
+  # Extract predicted state abundances
+  pred <- as.matrix(
+    as.data.frame(prediction)[, states3]
+  )
+
+  # Convert predictions to proportions
+  pred <- pred / rowSums(pred)
+
+  # Prevent numerical issues with log(0)
+  pred <- pmax(pred, 1e-12)
+  pred <- pred / rowSums(pred)
+
+  # Extract observed cell counts
+  observed_counts <- as.matrix(control_counts[, states3])
+
+  # Calculate negative log-likelihood
+  -sum(observed_counts * log(pred))
+
+}
+
+profile_nll(
+  log_k = log(c(0.014, 0.157)),
+  fixed_r = 0.05
+)
+
+test_fit <- optim(
+  par = log(c(0.014, 0.157)),
+  fn = profile_nll,
+  fixed_r = 0.05,
+  method = "Nelder-Mead"
+)
+
+test_fit
+
+```
+
+```{r}
+profile_results <- lapply(r_values, function(r_fixed) {
+
+  fit <- optim(
+    par = log(c(0.014, 0.157)),
+    fn = profile_nll,
+    fixed_r = r_fixed,
+    method = "Nelder-Mead"
+  )
+
+  data.frame(
+    r = r_fixed,
+    neg_log_likelihood = fit$value,
+    k1 = exp(fit$par[1]),
+    k2 = exp(fit$par[2]),
+    convergence = fit$convergence
+  )
+
+})
+
+profile_results <- bind_rows(profile_results)
+
+
+head(profile_results)
+```
+
+As we force the vegetative pop to grow faster, the opt. compensates by increasing the rates at which cells enter and complete sporilatikn 
+
+Plot the profile liklighood 
+```{r}
+ggplot(
+  profile_results,
+  aes(
+    x = r,
+    y = neg_log_likelihood - min(neg_log_likelihood)
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  labs(
+    title = "Profile likelihood for vegetative growth rate",
+    x = expression("Growth rate, " * r * " (h"^-1 * ")"),
+    y = "Difference in negative log-likelihood"
+  ) +
+  theme_classic()
+```
+###### APPROACH 3 #########
+
+Modify to allow cells to enter sporulation at different rates during early and late phases 
+```{r}
+population_model_time <- function(t, state, parameters) {
+
+  with(as.list(c(state, parameters)), {
+
+   k1 <- if (t < t_switch) k_early else k_late
+
+    dVegetative <- r * Vegetative - k1 * Vegetative
+
+    dSporulating <- k1 * Vegetative - k2 * Sporulating
+
+    dComplete <- k2 * Sporulating
+
+    list(c(
+      dVegetative,
+      dSporulating,
+      dComplete
+    ))
+  })
+}
+```
+
+```{r}
+fit_population_time <- function(treatment_name, t_switch) { # allow for different sporilation initiation switching times
+
+  obs <- observed3 %>%
+    filter(Treatment == treatment_name)
+
+  counts <- obs %>%
+    select(Time, State, n) %>%
+    pivot_wider(
+      names_from = State,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    arrange(Time)
+
+  times <- counts$Time
+
+  y0 <- as.numeric(counts[1, states3])
+  y0 <- y0 / sum(y0)
+  names(y0) <- states3
+
+  objective <- function(log_parameters) {
+
+parameters <- exp(log_parameters) # estimate rate parms
+names(parameters) <- c(
+  "r", "k_early", "k_late", "k2"
+)
+
+parameters <- c(parameters, t_switch = t_switch)
+
+prediction <- tryCatch(
+  ode(
+    y = y0,
+    times = sort(unique(c(times, t_switch))),
+    func = population_model_time,
+    parms = parameters
+  ),
+  error = function(e) NULL
+)
+    if (is.null(prediction)) return(1e12)
+
+    prediction <- as.data.frame(prediction) %>%
+      filter(time %in% times)
+
+    pred <- as.matrix(prediction[, states3])
+
+    pred <- pred / rowSums(pred)
+    pred <- pmax(pred, 1e-12)
+    pred <- pred / rowSums(pred)
+
+    observed_counts <- as.matrix(counts[, states3])
+
+    -sum(observed_counts * log(pred)) 
+  }
+
+  fit <- optim(
+    par = log(c(0.1, 0.1, 0.1, 0.1)),
+    fn = objective,
+    method = "Nelder-Mead",
+    control = list(maxit = 10000)
+  )
+
+  parameters <- exp(fit$par)
+  names(parameters) <- c(
+    "r", "k_early", "k_late", "k2"
+  )
+
+list(
+  treatment = treatment_name,
+  t_switch = t_switch,
+  parameters = parameters,
+  initial = y0,
+  fit = fit
+)
+}
+```
+
+Test updated function
+```{r}
+test_time_fit <- fit_population_time(
+  treatment_name = "Control",
+  t_switch = 12
+)
+
+test_time_fit$parameters
+test_time_fit$fit$value
+test_time_fit$fit$convergence
+```
+
+```{r}
+
+# Candidate switching times
+switch_times <- c(4, 6, 8, 10, 12, 14, 16)
+
+# Fit each treatment at every switching time
+fits_time <- lapply(
+  unique(observed3$Treatment),
+  function(trt) {
+    lapply(
+      switch_times,
+      function(ts) fit_population_time(trt, ts)
+    )
+  }
+)
+
+names(fits_time) <- unique(observed3$Treatment)
+
+parameter_table_time <- bind_rows(
+  lapply(fits_time, function(treatment_fits) {
+
+    bind_rows(
+      lapply(treatment_fits, function(x) {
+
+        data.frame(
+          Treatment = x$treatment,
+          t_switch = x$t_switch,
+          r = x$parameters["r"],
+          k_early = x$parameters["k_early"],
+          k_late = x$parameters["k_late"],
+          k2 = x$parameters["k2"],
+          NLL = x$fit$value,
+          convergence = x$fit$convergence
+        )
+
+      })
+    )
+  })
+)
+
+parameter_table_time
+
+# Identify best fitting model 
+best_switch_times <- parameter_table_time %>%
+  group_by(Treatment) %>%
+  slice_min(NLL, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+best_switch_times
+
+```
+
+```{r}
+# Extract the best-fitting model for each treatment
+best_fits_time <- lapply(fits_time, function(treatment_fits) {
+  treatment_fits[[which.min(
+    sapply(treatment_fits, function(x) x$fit$value)
+  )]]
+})
+
+# Generate predictions from the best-fitting models
+predictions_time <- bind_rows(
+  lapply(best_fits_time, function(x) {
+
+    times <- sort(unique(c(
+      observed3$Time[observed3$Treatment == x$treatment],
+      x$t_switch
+    )))
+
+    parameters <- c(
+      x$parameters,
+      t_switch = x$t_switch
+    )
+
+    ode(
+      y = x$initial,
+      times = times,
+      func = population_model_time,
+      parms = parameters
+    ) %>%
+      as.data.frame() %>%
+      mutate(
+        Treatment = x$treatment
+      )
+  })
+)
+```
+
+Convert preditions to proportions
+```{r}
+predictions_time_long <- predictions_time %>%
+  mutate(
+    total = Vegetative + Sporulating + Complete
+  ) %>%
+  pivot_longer(
+    cols = all_of(states3),
+    names_to = "State",
+    values_to = "abundance"
+  ) %>%
+  mutate(
+    proportion = abundance / total
+  )
+```
+
+
+```{r}
+approach3_plot <- ggplot() +
+
+  # Model predictions
+  geom_line(
+    data = predictions_time_long,
+    aes(
+      x = time,
+      y = proportion,
+      color = State
+    ),
+    linewidth = 1
+  ) +
+
+  # Observed microscopy proportions
+  geom_point(
+    data = observed3,
+    aes(
+      x = Time,
+      y = proportion,
+      color = State
+    ),
+    size = 2,
+    alpha = 0.7
+  ) +
+
+  facet_wrap(~ Treatment) +
+
+  scale_y_continuous(
+    limits = c(0, 1)
+  ) +
+
+  labs(
+    title = "",
+    subtitle = "",
+    x = "Time (h)",
+    y = "Proportion of cells",
+    color = "Cell state"
+  )
+
+approach3_plot
+```
+
+
+
+```{r}
+# Compare goodness of fit against constant rate model 
+predicted_time_at_obs <- predictions_time_long %>%
+  filter(time %in% unique(observed3$Time)) %>%
+  rename(
+    Time = time,
+    predicted = proportion
+  ) %>%
+  select(Treatment, Time, State, predicted)
+
+comparison_time <- observed3 %>%
+  left_join(
+    predicted_time_at_obs,
+    by = c("Treatment", "Time", "State")
+  ) %>%
+  mutate(
+    residual = proportion - predicted
+  )
+
+fit_metrics_time <- comparison_time %>%
+  group_by(Treatment) %>%
+  summarise(
+    RMSE = sqrt(mean(residual^2)),
+    MAE = mean(abs(residual)),
+    .groups = "drop"
+  )
+
+fit_metrics_time
+```
+Compare 
+```{r}
+fit_metrics3 %>%
+  rename(
+    RMSE_constant = RMSE,
+    MAE_constant = MAE
+  ) %>%
+  left_join(
+    fit_metrics_time %>%
+      rename(
+        RMSE_time = RMSE,
+        MAE_time = MAE
+      ),
+    by = "Treatment"
+  )
+```
+
+Comparing model 2 approach (fits3 to this approach)
+```{r}
+# Extract negative log-likelihoods from Approach 2
+nll_approach2 <- data.frame(
+  Treatment = sapply(fits3, function(x) x$treatment),
+  NLL = sapply(fits3, function(x) x$fit$value)
+)
+
+nll_approach2
+```
+
+AIC
+
+```{r}
+# Approach 2: 3 parameters
+aic_approach2 <- nll_approach2 %>%
+  mutate(
+    Model = "Approach 2",
+    AIC = 2 * 3 + 2 * NLL
+  )
+
+# Approach 3: 5 parameters
+aic_approach3 <- best_switch_times %>%
+  mutate(
+    Model = "Approach 3",
+    AIC = 2 * 5 + 2 * NLL
+  )
+
+# Combine results
+aic_comparison <- bind_rows(
+  aic_approach2 %>%
+    select(Treatment, Model, AIC),
+  aic_approach3 %>%
+    select(Treatment, Model, AIC)
+)
+
+aic_comparison
+```
+
+
+
+PART 3: FITTING TO GAM (because GAM does not assume that cells progress through stages at constant rates)
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(mgcv)
+```
+
+Define stage order and prep counts
+```{r}
+stages <- c(
+  "vegetative",
+  "stage1",
+  "stage2",
+  "stage3",
+  "stage4",
+  "stage5",
+  "complete"
+)
+
+gam_data <- filt.data %>%
+  filter(name %in% stages) %>%
+  mutate(
+    name = factor(name, levels = stages),
+    Treatment = factor(Treatment)
+  ) %>%
+  count(Treatment, Time, name, name = "n") %>%
+  complete(
+    nesting(Treatment, Time),
+    name = factor(stages, levels = stages),
+    fill = list(n = 0)
+  ) %>%
+  group_by(Treatment, Time) %>%
+  mutate(
+    total = sum(n),
+    proportion = n / total
+  ) %>%
+  ungroup()
+```
+
+Fit GAM separately for each treatment
+```{r}
+gam_cells <- filt.data %>%
+  filter(name %in% stages) %>%
+  mutate(
+    Stage = match(name, stages) - 1L,
+    Treatment = factor(Treatment)
+  )
+
+fit_stage_gam <- function(treatment_name) {
+
+  dat <- gam_cells %>%
+    filter(Treatment == treatment_name)
+
+  gam(
+    list(
+      Stage ~ s(Time, k = 6, bs = "cr"),
+      ~ s(Time, k = 6, bs = "cr"),
+      ~ s(Time, k = 6, bs = "cr"),
+      ~ s(Time, k = 6, bs = "cr"),
+      ~ s(Time, k = 6, bs = "cr"),
+      ~ s(Time, k = 6, bs = "cr")
+    ),
+    family = multinom(K = 6),
+    data = dat,
+    method = "REML"
+  )
+}
+
+gam_fits <- lapply(
+  levels(gam_cells$Treatment),
+  fit_stage_gam
+)
+
+names(gam_fits) <- levels(gam_cells$Treatment)
+```
+
+Generate predicted stage probabilities 
+
+Check that the predicted probabilities sum to 1
+
+Plot obseved and predicted stage probabilities 
+
+Evaluate goodness of fit
